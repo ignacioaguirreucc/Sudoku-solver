@@ -105,12 +105,37 @@ class SudokuImageProcessor:
         return sudoku_array
     
     def _leer_numero(self, celda):
-        """Lee un número de una celda usando OCR"""
-        resultado = self.reader.readtext(celda, allowlist='123456789', detail=0)
+        """Lee un número de una celda usando OCR con validación mejorada"""
+        # Mejorar contraste antes de OCR
+        celda_mejorada = cv2.threshold(celda, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        
+        # Intentar con configuración más estricta
+        resultado = self.reader.readtext(celda_mejorada, allowlist='123456789', detail=1, paragraph=False)
         
         if resultado and len(resultado) > 0:
-            texto = resultado[0].strip()
-            if texto.isdigit() and 1 <= int(texto) <= 9:
-                return int(texto)
+            texto = resultado[0][1].strip()
+            confianza = resultado[0][2]
+            
+            # Solo aceptar si tiene buena confianza
+            if texto.isdigit() and 1 <= int(texto) <= 9 and confianza > 0.3:
+                numero = int(texto)
+                
+                # Validación adicional: verificar forma del número
+                # Si la confianza es baja, analizar la forma
+                if confianza < 0.6:
+                    # El 7 tiene más píxeles en la parte superior
+                    # El 1 es más vertical y delgado
+                    altura, ancho = celda_mejorada.shape
+                    mitad_superior = celda_mejorada[0:altura//2, :]
+                    pixeles_arriba = cv2.countNonZero(mitad_superior)
+                    pixeles_totales = cv2.countNonZero(celda_mejorada)
+                    
+                    ratio_superior = pixeles_arriba / (pixeles_totales + 1)
+                    
+                    # Si hay más del 60% de píxeles arriba, probablemente es un 7
+                    if numero == 1 and ratio_superior > 0.55:
+                        return 7
+                
+                return numero
         
         return 0  # No se pudo leer

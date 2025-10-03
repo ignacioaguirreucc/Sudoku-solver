@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Imagenes de prueba generadas
+output_*.png
+celda_*.png
+
+# VS Code
+.vscode/
+
+# Modelos de EasyOCR (se descargan automaticamente)
+.EasyOCR/
+
+# Env
+venv/
+env/

@@ -18,8 +18,18 @@ class SudokuImageProcessor:
         Returns:
             list: matriz 9x9 con el sudoku (0 para celdas vacías)
         """
+        # Normalizar colores primero (eliminar fondos de color)
+        # Convertir a escala de grises de manera más robusta
+        if len(imagen.shape) == 3:
+            # Si tiene colores, usar conversión ponderada que ignora colores de fondo
+            gris = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
+            
+            # Normalizar intensidades para eliminar el efecto de fondos coloreados
+            gris = cv2.normalize(gris, None, 0, 255, cv2.NORM_MINMAX)
+        else:
+            gris = imagen
+        
         # Preprocesamiento
-        gris = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gris, (5, 5), 0)
         umbral = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                         cv2.THRESH_BINARY_INV, 11, 2)
@@ -67,11 +77,31 @@ class SudokuImageProcessor:
     
     def _extraer_numeros(self, sudoku_transformado):
         """Extrae los números de cada celda usando OCR"""
-        gris = cv2.cvtColor(sudoku_transformado, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gris, (3, 3), 0)
+        
+        # PASO 1: Convertir a escala de grises
+        if len(sudoku_transformado.shape) == 3:
+            gris = cv2.cvtColor(sudoku_transformado, cv2.COLOR_BGR2GRAY)
+        else:
+            gris = sudoku_transformado
+        
+        # PASO 2: Usar CLAHE para mejorar contraste local
+        # Esto funciona MUCHO mejor con fondos de color
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        gris = clahe.apply(gris)
+        
+        # PASO 3: Preprocesamiento GLOBAL (antes de dividir en celdas)
+        # Blur suave
+        blur = cv2.GaussianBlur(gris, (5, 5), 0)
+        
+        # Umbral adaptativo en toda la imagen (no por celda)
+        # Esto mantiene mejor el contraste en áreas con fondo de color
         umbral = cv2.adaptiveThreshold(blur, 255, 
                                        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                        cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # PASO 4: Guardar también la versión en escala de grises procesada
+        # para usar como backup en OCR
+        gris_procesado = gris.copy()
         
         sudoku_array = []
         lado = 450
@@ -85,17 +115,33 @@ class SudokuImageProcessor:
                 x1 = columna * tamaño_celda
                 x2 = (columna + 1) * tamaño_celda
                 
-                celda = umbral[y1:y2, x1:x2]
+                # Extraer celda de ambas versiones
+                celda_umbral = umbral[y1:y2, x1:x2]
+                celda_gris = gris_procesado[y1:y2, x1:x2]
+                
                 margen = 5
-                celda_limpia = celda[margen:-margen, margen:-margen]
+                celda_umbral_limpia = celda_umbral[margen:-margen, margen:-margen]
+                celda_gris_limpia = celda_gris[margen:-margen, margen:-margen]
                 
                 # Detectar si hay contenido
-                pixeles_blancos = cv2.countNonZero(celda_limpia)
-                area_celda = celda_limpia.shape[0] * celda_limpia.shape[1]
+                pixeles_blancos = cv2.countNonZero(celda_umbral_limpia)
+                area_celda = celda_umbral_limpia.shape[0] * celda_umbral_limpia.shape[1]
                 porcentaje = (pixeles_blancos / area_celda) * 100
                 
-                if porcentaje > 3:
-                    numero = self._leer_numero(celda_limpia)
+                # Rango más flexible para detectar números
+                if porcentaje > 3 and porcentaje < 65:
+                    # ESTRATEGIA 1: Probar con versión umbralizada
+                    numero = self._leer_numero(celda_umbral_limpia)
+                    
+                    # ESTRATEGIA 2: Si falla, probar con versión en escala de grises
+                    if numero == 0:
+                        numero = self._leer_numero(celda_gris_limpia, usar_umbral=False)
+                    
+                    # ESTRATEGIA 3: Si todavía falla y hay bastante contenido, sin margen
+                    if numero == 0 and porcentaje > 8:
+                        celda_sin_margen = celda_gris[2:-2, 2:-2]
+                        numero = self._leer_numero(celda_sin_margen, usar_umbral=False)
+                    
                     fila_sudoku.append(numero)
                 else:
                     fila_sudoku.append(0)
@@ -104,57 +150,99 @@ class SudokuImageProcessor:
         
         return sudoku_array
     
-    def _leer_numero(self, celda):
+    def _leer_numero(self, celda, usar_umbral=True):
         """Lee un número de una celda usando OCR"""
-        # Mejorar contraste antes de OCR
-        celda_mejorada = cv2.threshold(celda, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        # Si se pide, aplicar umbral OTSU
+        if usar_umbral:
+            celda_mejorada = cv2.threshold(celda, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        else:
+            # Para escala de grises, invertir para que números sean blancos
+            celda_mejorada = cv2.threshold(celda, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
         
-        # Intentar con configuración más estricta
+        # Intentar OCR
         resultado = self.reader.readtext(celda_mejorada, allowlist='123456789', detail=1, paragraph=False)
         
         if resultado and len(resultado) > 0:
             texto = resultado[0][1].strip()
             confianza = resultado[0][2]
             
-            # Solo aceptar si tiene confianza razonable
-            if texto.isdigit() and 1 <= int(texto) <= 9 and confianza > 0.4:
+            # Ser más tolerante con la confianza (bajar umbral de 0.4 a 0.25)
+            if texto.isdigit() and 1 <= int(texto) <= 9 and confianza > 0.25:
                 numero = int(texto)
                 
-                # Análisis de forma solo para 1 y 7 con baja confianza
-                if (numero == 1 or numero == 7) and confianza < 0.7:
-                    altura, ancho = celda_mejorada.shape
-                    
-                    # Analizar ancho del dígito
-                    # El 1 es muy delgado (ancho < 40% del ancho total)
-                    # El 7 ocupa más ancho (> 50% del ancho total)
-                    columnas_con_pixeles = []
-                    for col in range(ancho):
-                        if cv2.countNonZero(celda_mejorada[:, col]) > 0:
-                            columnas_con_pixeles.append(col)
-                    
-                    if len(columnas_con_pixeles) > 0:
-                        ancho_digito = max(columnas_con_pixeles) - min(columnas_con_pixeles)
-                        ratio_ancho = ancho_digito / ancho
-                        
-                        # Analizar distribución vertical
-                        tercio_superior = celda_mejorada[0:altura//3, :]
-                        tercio_medio = celda_mejorada[altura//3:2*altura//3, :]
-                        
-                        pixeles_arriba = cv2.countNonZero(tercio_superior)
-                        pixeles_medio = cv2.countNonZero(tercio_medio)
-                        pixeles_totales = cv2.countNonZero(celda_mejorada)
-                        
-                        # Heurísticas mejoradas:
-                        # - El 1 es delgado (ratio_ancho < 0.35) y uniforme verticalmente
-                        # - El 7 es más ancho (ratio_ancho > 0.45) y tiene mucho peso arriba
-                        
-                        if ratio_ancho < 0.35 and pixeles_medio > pixeles_arriba * 0.8:
-                            # Muy delgado y uniforme = probablemente 1
-                            return 1
-                        elif ratio_ancho > 0.45 and pixeles_arriba > pixeles_medio * 1.2:
-                            # Más ancho y con peso arriba = probablemente 7
-                            return 7
+                # Análisis de forma para números problemáticos
+                # Siempre verificar 1, y los demás solo con baja confianza
+                if numero == 1 or (confianza < 0.75 and numero in [4, 7, 9]):
+                    numero_corregido = self._verificar_forma(celda_mejorada, numero)
+                    if numero_corregido is not None:
+                        return numero_corregido
                 
                 return numero
         
         return 0  # No se pudo leer
+    
+    def _verificar_forma(self, celda, numero_detectado):
+        """Verifica la forma del dígito para corregir errores comunes"""
+        altura, ancho = celda.shape
+        
+        # Analizar ancho del dígito
+        columnas_con_pixeles = []
+        filas_con_pixeles = []
+        
+        for col in range(ancho):
+            if cv2.countNonZero(celda[:, col]) > 0:
+                columnas_con_pixeles.append(col)
+        
+        for row in range(altura):
+            if cv2.countNonZero(celda[row, :]) > 0:
+                filas_con_pixeles.append(row)
+        
+        if len(columnas_con_pixeles) == 0 or len(filas_con_pixeles) == 0:
+            return None
+            
+        ancho_digito = max(columnas_con_pixeles) - min(columnas_con_pixeles)
+        altura_digito = max(filas_con_pixeles) - min(filas_con_pixeles)
+        ratio_ancho = ancho_digito / ancho
+        ratio_altura = altura_digito / altura
+        
+        # Dividir en tercios verticales
+        tercio_sup = celda[0:altura//3, :]
+        tercio_med = celda[altura//3:2*altura//3, :]
+        tercio_inf = celda[2*altura//3:altura, :]
+        
+        pix_sup = cv2.countNonZero(tercio_sup)
+        pix_med = cv2.countNonZero(tercio_med)
+        pix_inf = cv2.countNonZero(tercio_inf)
+        pix_tot = cv2.countNonZero(celda)
+        
+        # Heurísticas específicas
+        if numero_detectado in [1, 7]:
+            # 1: muy delgado, vertical, distribución uniforme, alto
+            # 7: más ancho, peso arriba, línea horizontal
+            
+            # El 1 es MUY delgado y ocupa mucha altura
+            if ratio_ancho < 0.4 and ratio_altura > 0.65 and abs(pix_med - pix_sup) < pix_tot * 0.25:
+                return 1
+            # El 7 es más ancho y tiene más peso arriba
+            elif ratio_ancho > 0.45 and (pix_sup > pix_med * 1.2 or pix_sup > pix_inf * 1.3):
+                return 7
+        
+        elif numero_detectado in [4, 9]:
+            # 4: tiene hueco abajo-izquierda, línea vertical derecha
+            # 9: círculo arriba, línea abajo
+            
+            # Analizar mitad izquierda vs derecha
+            mitad_izq = celda[:, :ancho//2]
+            mitad_der = celda[:, ancho//2:]
+            
+            pix_izq = cv2.countNonZero(mitad_izq)
+            pix_der = cv2.countNonZero(mitad_der)
+            
+            # El 9 tiene más peso arriba y es más circular
+            # El 4 tiene peso más uniforme y línea vertical prominente
+            if pix_sup > pix_inf * 1.5 and pix_izq > pix_der * 0.7:
+                return 9
+            elif pix_der > pix_izq * 1.2 and abs(pix_sup - pix_inf) < pix_tot * 0.3:
+                return 4
+        
+        return None  # No se pudo determinar, usar detección original

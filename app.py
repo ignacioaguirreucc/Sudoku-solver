@@ -16,7 +16,11 @@ st.write("Subí una foto de un sudoku y lo resuelvo al instante")
 def get_processor():
     return SudokuImageProcessor()
 
-processor = get_processor()
+# Mostrar mensaje mientras carga el OCR
+with st.spinner("Inicializando el motor de OCR... (esto tarda unos segundos la primera vez)"):
+    processor = get_processor()
+    
+st.success("✅ Sistema listo!")
 
 # Upload de imagen
 archivo = st.file_uploader("Elegí una imagen del sudoku", type=['png', 'jpg', 'jpeg'])

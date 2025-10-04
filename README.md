@@ -37,6 +37,4 @@ streamlit run app.py
 - Buena iluminación
 - Evitá sombras y reflejos
 
----
 
-Hecho con ❤️ por Nacho

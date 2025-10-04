@@ -124,9 +124,10 @@ print("✓ Sudoku transformado guardado en debug_sudoku_transformado.png")
 # Extraer varias celdas para probar
 tamaño_celda = lado // 9
 
-# Vamos a probar con la celda [0,1] que tiene "7" (segunda columna, primera fila)
-fila_problema = 0  
-col_problema = 1
+# Vamos a probar con una celda que tiene "1" rosa
+# Según tu imagen: fila 6, columna 0 tiene un "1" con fondo rosa
+fila_problema = 6  
+col_problema = 0
 
 y1 = fila_problema * tamaño_celda
 y2 = (fila_problema + 1) * tamaño_celda

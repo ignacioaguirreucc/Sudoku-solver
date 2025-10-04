@@ -128,29 +128,70 @@ class SudokuImageProcessor:
                 area_celda = celda_umbral_limpia.shape[0] * celda_umbral_limpia.shape[1]
                 porcentaje = (pixeles_blancos / area_celda) * 100
                 
+                numero = 0
+                
                 # Rango más flexible para detectar números
                 if porcentaje > 3 and porcentaje < 65:
+                    # Determinar si es número delgado (posiblemente 1 o 7)
+                    es_delgado = porcentaje < 10
+                    
                     # ESTRATEGIA 1: Probar con versión umbralizada
-                    numero = self._leer_numero(celda_umbral_limpia)
+                    numero = self._leer_numero(celda_umbral_limpia, engrosar=es_delgado)
                     
                     # ESTRATEGIA 2: Si falla, probar con versión en escala de grises
                     if numero == 0:
-                        numero = self._leer_numero(celda_gris_limpia, usar_umbral=False)
+                        numero = self._leer_numero(celda_gris_limpia, usar_umbral=False, engrosar=es_delgado)
                     
                     # ESTRATEGIA 3: Si todavía falla y hay bastante contenido, sin margen
                     if numero == 0 and porcentaje > 8:
                         celda_sin_margen = celda_gris[2:-2, 2:-2]
-                        numero = self._leer_numero(celda_sin_margen, usar_umbral=False)
-                    
-                    fila_sudoku.append(numero)
-                else:
-                    fila_sudoku.append(0)
+                        numero = self._leer_numero(celda_sin_margen, usar_umbral=False, engrosar=False)
+                
+                # CASO ESPECIAL: Porcentaje muy bajo (1-3%) puede ser un "1" muy delgado
+                elif porcentaje >= 1 and porcentaje <= 3:
+                    # El "1" es muy delgado, intentar con menos margen
+                    celda_margen_minimo = celda_gris[1:-1, 1:-1]
+                    numero = self._leer_numero(celda_margen_minimo, usar_umbral=False, engrosar=True)
+                
+                fila_sudoku.append(numero)
             
             sudoku_array.append(fila_sudoku)
         
+        # Validar que el sudoku detectado sea válido
+        if not self._validar_sudoku(sudoku_array):
+            print("⚠️ ADVERTENCIA: El sudoku detectado tiene conflictos (números repetidos)")
+        
         return sudoku_array
     
-    def _leer_numero(self, celda, usar_umbral=True):
+    def _validar_sudoku(self, sudoku):
+        """Verifica que no haya números repetidos en filas, columnas o cajas"""
+        # Verificar filas
+        for fila in sudoku:
+            numeros = [n for n in fila if n != 0]
+            if len(numeros) != len(set(numeros)):
+                return False
+        
+        # Verificar columnas
+        for col in range(9):
+            numeros = [sudoku[fila][col] for fila in range(9) if sudoku[fila][col] != 0]
+            if len(numeros) != len(set(numeros)):
+                return False
+        
+        # Verificar cajas 3x3
+        for caja_fila in range(3):
+            for caja_col in range(3):
+                numeros = []
+                for i in range(3):
+                    for j in range(3):
+                        num = sudoku[caja_fila*3 + i][caja_col*3 + j]
+                        if num != 0:
+                            numeros.append(num)
+                if len(numeros) != len(set(numeros)):
+                    return False
+        
+        return True
+    
+    def _leer_numero(self, celda, usar_umbral=True, engrosar=False):
         """Lee un número de una celda usando OCR"""
         # Si se pide, aplicar umbral OTSU
         if usar_umbral:
@@ -159,8 +200,20 @@ class SudokuImageProcessor:
             # Para escala de grises, invertir para que números sean blancos
             celda_mejorada = cv2.threshold(celda, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
         
-        # Intentar OCR
-        resultado = self.reader.readtext(celda_mejorada, allowlist='123456789', detail=1, paragraph=False)
+        # MEJORA: Engrosar SOLO si es un número delgado (1 o 7)
+        # Si engrosamos todos, el 7 se parece al 1
+        if engrosar:
+            kernel = np.ones((2,2), np.uint8)
+            celda_mejorada = cv2.dilate(celda_mejorada, kernel, iterations=1)
+        
+        # MEJORA CRÍTICA: Redimensionar a 3x el tamaño para mejor OCR
+        # EasyOCR funciona mejor con imágenes más grandes
+        altura_original, ancho_original = celda_mejorada.shape
+        celda_grande = cv2.resize(celda_mejorada, (ancho_original * 3, altura_original * 3), 
+                                  interpolation=cv2.INTER_CUBIC)
+        
+        # Intentar OCR con la versión grande
+        resultado = self.reader.readtext(celda_grande, allowlist='123456789', detail=1, paragraph=False)
         
         if resultado and len(resultado) > 0:
             texto = resultado[0][1].strip()
@@ -217,15 +270,33 @@ class SudokuImageProcessor:
         
         # Heurísticas específicas
         if numero_detectado in [1, 7]:
-            # 1: muy delgado, vertical, distribución uniforme, alto
-            # 7: más ancho, peso arriba, línea horizontal
+            # Características distintivas:
+            # 1: MUY delgado, vertical, distribución uniforme
+            # 7: Más ancho, línea horizontal arriba, línea diagonal/vertical abajo
             
-            # El 1 es MUY delgado y ocupa mucha altura
-            if ratio_ancho < 0.4 and ratio_altura > 0.65 and abs(pix_med - pix_sup) < pix_tot * 0.25:
+            # CRITERIO 1: Ancho relativo
+            # El 1 casi siempre es más delgado que 0.40
+            # El 7 casi siempre es más ancho que 0.50
+            if ratio_ancho < 0.40:
+                # Probablemente es 1
                 return 1
-            # El 7 es más ancho y tiene más peso arriba
-            elif ratio_ancho > 0.45 and (pix_sup > pix_med * 1.2 or pix_sup > pix_inf * 1.3):
+            elif ratio_ancho > 0.55:
+                # Probablemente es 7
                 return 7
+            
+            # CRITERIO 2: Distribución vertical (para casos intermedios)
+            # El 7 tiene MUCHO más contenido arriba (la línea horizontal)
+            # El 1 es más uniforme
+            if pix_sup > pix_med * 1.5 or pix_sup > pix_inf * 1.5:
+                # Claramente más peso arriba = 7
+                return 7
+            
+            # CRITERIO 3: Si es dudoso y delgado, es 1
+            if ratio_ancho < 0.48:
+                return 1
+            
+            # Por defecto, mantener detección original
+            return numero_detectado
         
         elif numero_detectado in [4, 9]:
             # 4: tiene hueco abajo-izquierda, línea vertical derecha
